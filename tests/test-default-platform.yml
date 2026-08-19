@@ -1,0 +1,89 @@
+name: Test default platform - UNIVERSAL
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Start mock SDKMAN! backend
+        run: |
+          cat > /tmp/mock_sdkman_server.py << 'EOF'
+          import http.server
+          import json
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  if self.path == '/release':
+                      length = int(self.headers.get('Content-Length', 0))
+                      body = self.rfile.read(length)
+                      data = json.loads(body)
+                      with open('/tmp/sdkman_request.json', 'w') as f:
+                          json.dump({'body': data}, f)
+                      self.send_response(201)
+                      self.send_header('Content-Type', 'application/json')
+                      self.end_headers()
+                      self.wfile.write(b'{"status":"RELEASED"}')
+                  else:
+                      self.send_response(404)
+                      self.end_headers()
+
+              def log_message(self, format, *args):
+                  pass
+
+          server = http.server.HTTPServer(('127.0.0.1', 18083), Handler)
+          server.serve_forever()
+          EOF
+          python3 /tmp/mock_sdkman_server.py &
+          echo $! > /tmp/mock_server.pid
+          sleep 1
+          echo "Mock server started on port 18083"
+
+      - id: action
+        uses: .
+        with:
+          consumer-key: "test-key"
+          consumer-token: "test-token"
+          candidate: "groovy"
+          version: "4.0.0"
+          url: "https://example.com/groovy-4.0.0.zip"
+          # platform is intentionally omitted to test the default value
+          backend: "http://127.0.0.1:18083"
+
+      - name: Assert request was received
+        run: |
+          if [ ! -f /tmp/sdkman_request.json ]; then
+            echo "FAIL: mock server did not receive any request"
+            exit 1
+          fi
+          echo "Request received:"
+          cat /tmp/sdkman_request.json
+          echo "PASS"
+
+      - name: Assert default platform is UNIVERSAL
+        run: |
+          PLATFORM=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['platform'])")
+          echo "actual platform: $PLATFORM"
+          if [ "$PLATFORM" != "UNIVERSAL" ]; then
+            echo "FAIL: expected default platform 'UNIVERSAL', got '$PLATFORM'"
+            exit 1
+          fi
+          echo "PASS: default platform is UNIVERSAL"
+
+      - name: Assert checksums are empty when not provided
+        run: |
+          CHECKSUMS=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(json.dumps(d['body']['checksums']))")
+          echo "actual checksums: $CHECKSUMS"
+          if [ "$CHECKSUMS" != "{}" ]; then
+            echo "FAIL: expected empty checksums '{}', got '$CHECKSUMS'"
+            exit 1
+          fi
+          echo "PASS: checksums are empty when not provided"
+
+      - name: Stop mock server
+        if: always()
+        run: |
+          if [ -f /tmp/mock_server.pid ]; then
+            kill $(cat /tmp/mock_server.pid) 2>/dev/null || true
+          fi

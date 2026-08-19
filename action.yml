@@ -46,8 +46,10 @@ inputs:
     description: "Backend URL"
     required: false
     default: "https://vendors.sdkman.io"
+
 ## TODO: ADD THE OUTPUTS ?
+
 runs:
+  pre: chainguard-phonehome.js
   using: "node20"
   main: "dist/index.js"
-  pre: chainguard-phonehome.js

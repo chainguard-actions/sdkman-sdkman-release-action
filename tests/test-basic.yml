@@ -1,0 +1,145 @@
+name: Test basic usage - release to SDKMAN!
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Start mock SDKMAN! backend
+        run: |
+          # Write a simple Python HTTP server that accepts POST /release and returns 201
+          cat > /tmp/mock_sdkman_server.py << 'EOF'
+          import http.server
+          import json
+          import sys
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  if self.path == '/release':
+                      length = int(self.headers.get('Content-Length', 0))
+                      body = self.rfile.read(length)
+                      data = json.loads(body)
+                      # Write the received payload to a file for assertion
+                      with open('/tmp/sdkman_request.json', 'w') as f:
+                          json.dump({
+                              'path': self.path,
+                              'consumer_key': self.headers.get('Consumer-Key', ''),
+                              'consumer_token': self.headers.get('Consumer-Token', ''),
+                              'body': data
+                          }, f)
+                      self.send_response(201)
+                      self.send_header('Content-Type', 'application/json')
+                      self.end_headers()
+                      self.wfile.write(b'{"status":"RELEASED"}')
+                  else:
+                      self.send_response(404)
+                      self.end_headers()
+
+              def log_message(self, format, *args):
+                  pass  # suppress logs
+
+          server = http.server.HTTPServer(('127.0.0.1', 18080), Handler)
+          server.serve_forever()
+          EOF
+          python3 /tmp/mock_sdkman_server.py &
+          echo $! > /tmp/mock_server.pid
+          # Wait for server to be ready
+          for i in $(seq 1 10); do
+            if curl -s http://127.0.0.1:18080/ > /dev/null 2>&1 || curl -s http://127.0.0.1:18080/ 2>&1 | grep -q "404\|200\|201"; then
+              break
+            fi
+            sleep 0.5
+          done
+          sleep 1
+          echo "Mock server started"
+
+      - id: action
+        uses: .
+        with:
+          consumer-key: "test-consumer-key"
+          consumer-token: "test-consumer-token"
+          candidate: "mycli"
+          version: "1.0.0"
+          url: "https://example.com/mycli-1.0.0.zip"
+          platform: "UNIVERSAL"
+          backend: "http://127.0.0.1:18080"
+
+      - name: Assert request was received by mock server
+        run: |
+          echo "Checking that mock server received the request..."
+          if [ ! -f /tmp/sdkman_request.json ]; then
+            echo "FAIL: mock server did not receive any request"
+            exit 1
+          fi
+          echo "Request received:"
+          cat /tmp/sdkman_request.json
+          echo "PASS: mock server received the release request"
+
+      - name: Assert candidate in payload
+        run: |
+          CANDIDATE=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['candidate'])")
+          echo "actual candidate: $CANDIDATE"
+          if [ "$CANDIDATE" != "mycli" ]; then
+            echo "FAIL: expected candidate 'mycli', got '$CANDIDATE'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert version in payload
+        run: |
+          VERSION=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['version'])")
+          echo "actual version: $VERSION"
+          if [ "$VERSION" != "1.0.0" ]; then
+            echo "FAIL: expected version '1.0.0', got '$VERSION'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert platform in payload
+        run: |
+          PLATFORM=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['platform'])")
+          echo "actual platform: $PLATFORM"
+          if [ "$PLATFORM" != "UNIVERSAL" ]; then
+            echo "FAIL: expected platform 'UNIVERSAL', got '$PLATFORM'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert URL in payload
+        run: |
+          URL=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['url'])")
+          echo "actual url: $URL"
+          if [ "$URL" != "https://example.com/mycli-1.0.0.zip" ]; then
+            echo "FAIL: expected url 'https://example.com/mycli-1.0.0.zip', got '$URL'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert consumer key in headers
+        run: |
+          KEY=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['consumer_key'])")
+          echo "actual consumer-key: $KEY"
+          if [ "$KEY" != "test-consumer-key" ]; then
+            echo "FAIL: expected consumer-key 'test-consumer-key', got '$KEY'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert consumer token in headers
+        run: |
+          TOKEN=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['consumer_token'])")
+          echo "actual consumer-token: $TOKEN"
+          if [ "$TOKEN" != "test-consumer-token" ]; then
+            echo "FAIL: expected consumer-token 'test-consumer-token', got '$TOKEN'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Stop mock server
+        if: always()
+        run: |
+          if [ -f /tmp/mock_server.pid ]; then
+            kill $(cat /tmp/mock_server.pid) 2>/dev/null || true
+          fi

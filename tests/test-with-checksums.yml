@@ -7,45 +7,131 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Start mock SDKMAN backend
+      - name: Start mock SDKMAN! backend
         run: |
-          python3 -c "
-          import http.server, threading, json
+          cat > /tmp/mock_sdkman_server.py << 'EOF'
+          import http.server
+          import json
 
           class Handler(http.server.BaseHTTPRequestHandler):
               def do_POST(self):
-                  length = int(self.headers.get('Content-Length', 0))
-                  body = self.rfile.read(length)
-                  self.send_response(201)
-                  self.send_header('Content-Type', 'application/json')
-                  self.end_headers()
-                  self.wfile.write(json.dumps({'status': 'ok'}).encode())
-              def log_message(self, fmt, *args):
+                  if self.path == '/release':
+                      length = int(self.headers.get('Content-Length', 0))
+                      body = self.rfile.read(length)
+                      data = json.loads(body)
+                      with open('/tmp/sdkman_request.json', 'w') as f:
+                          json.dump({
+                              'path': self.path,
+                              'body': data
+                          }, f)
+                      self.send_response(201)
+                      self.send_header('Content-Type', 'application/json')
+                      self.end_headers()
+                      self.wfile.write(b'{"status":"RELEASED"}')
+                  else:
+                      self.send_response(404)
+                      self.end_headers()
+
+              def log_message(self, format, *args):
                   pass
 
-          server = http.server.HTTPServer(('127.0.0.1', 8767), Handler)
-          t = threading.Thread(target=server.serve_forever)
-          t.daemon = True
-          t.start()
-          import time; time.sleep(60)
-          " &
+          server = http.server.HTTPServer(('127.0.0.1', 18081), Handler)
+          server.serve_forever()
+          EOF
+          python3 /tmp/mock_sdkman_server.py &
+          echo $! > /tmp/mock_server.pid
           sleep 1
-          echo "Mock backend started on port 8767"
+          echo "Mock server started on port 18081"
 
       - id: action
         uses: .
         with:
-          consumer-key: "fake-consumer-key"
-          consumer-token: "fake-consumer-token"
-          candidate: "mycandidate"
-          version: "3.0.0"
-          url: "https://example.com/mycandidate-3.0.0.zip"
-          platform: "UNIVERSAL"
-          checksum-md5: "d41d8cd98f00b204e9800998ecf8427e"
-          checksum-sha-256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-          backend: "http://127.0.0.1:8767"
+          consumer-key: "test-key"
+          consumer-token: "test-token"
+          candidate: "myapp"
+          version: "2.5.0"
+          url: "https://example.com/myapp-2.5.0.zip"
+          platform: "LINUX_64"
+          checksum-md5: "abc123md5"
+          checksum-sha-1: "abc123sha1"
+          checksum-sha-256: "abc123sha256"
+          checksum-sha-512: "abc123sha512"
+          backend: "http://127.0.0.1:18081"
 
-      - name: Assert action completed successfully
+      - name: Assert request was received
         run: |
-          echo "Release with checksums action completed without error"
+          if [ ! -f /tmp/sdkman_request.json ]; then
+            echo "FAIL: mock server did not receive any request"
+            exit 1
+          fi
+          echo "Request received:"
+          cat /tmp/sdkman_request.json
           echo "PASS"
+
+      - name: Assert MD5 checksum in payload
+        run: |
+          MD5=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['checksums'].get('MD5', ''))")
+          echo "actual MD5: $MD5"
+          if [ "$MD5" != "abc123md5" ]; then
+            echo "FAIL: expected MD5 'abc123md5', got '$MD5'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert SHA-1 checksum in payload
+        run: |
+          SHA1=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['checksums'].get('SHA-1', ''))")
+          echo "actual SHA-1: $SHA1"
+          if [ "$SHA1" != "abc123sha1" ]; then
+            echo "FAIL: expected SHA-1 'abc123sha1', got '$SHA1'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert SHA-256 checksum in payload
+        run: |
+          SHA256=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['checksums'].get('SHA-256', ''))")
+          echo "actual SHA-256: $SHA256"
+          if [ "$SHA256" != "abc123sha256" ]; then
+            echo "FAIL: expected SHA-256 'abc123sha256', got '$SHA256'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert SHA-512 checksum in payload
+        run: |
+          SHA512=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['checksums'].get('SHA-512', ''))")
+          echo "actual SHA-512: $SHA512"
+          if [ "$SHA512" != "abc123sha512" ]; then
+            echo "FAIL: expected SHA-512 'abc123sha512', got '$SHA512'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert platform is set correctly
+        run: |
+          PLATFORM=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['platform'])")
+          echo "actual platform: $PLATFORM"
+          if [ "$PLATFORM" != "LINUX_64" ]; then
+            echo "FAIL: expected platform 'LINUX_64', got '$PLATFORM'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert no unexpected checksums in payload
+        run: |
+          # SHA-224 and SHA-384 were not provided, so they should not be in the payload
+          SHA224=$(python3 -c "import json; d=json.load(open('/tmp/sdkman_request.json')); print(d['body']['checksums'].get('SHA-224', 'NOT_PRESENT'))")
+          echo "SHA-224 (should be NOT_PRESENT): $SHA224"
+          if [ "$SHA224" != "NOT_PRESENT" ]; then
+            echo "FAIL: SHA-224 should not be in payload but got '$SHA224'"
+            exit 1
+          fi
+          echo "PASS: SHA-224 correctly absent"
+
+      - name: Stop mock server
+        if: always()
+        run: |
+          if [ -f /tmp/mock_server.pid ]; then
+            kill $(cat /tmp/mock_server.pid) 2>/dev/null || true
+          fi
