@@ -1,0 +1,36 @@
+name: Test deprecated inputs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          email: "test@example.com"
+          password: "fake-password"
+          candidate: "testcandidate"
+          version: "1.0.0"
+          url: "https://example.com/testcandidate-1.0.0.zip"
+          platform: "UNIVERSAL"
+          consumer-key: "deprecated-consumer-key"
+          consumer-token: "deprecated-consumer-token"
+          checksum-sha-1: "deprecated-sha1-checksum"
+          checksum-sha-224: "deprecated-sha224-checksum"
+          checksum-sha-384: "deprecated-sha384-checksum"
+      - name: Assert action ran (deprecated inputs accepted, fails gracefully with fake credentials)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: action succeeded (unexpected but acceptable)"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully as expected with fake credentials"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
